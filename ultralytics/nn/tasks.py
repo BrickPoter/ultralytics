@@ -68,6 +68,8 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
+    SEBlock,
+    C3SE,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1409,6 +1411,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SCDown,
             C2fCIB,
             A2C2f,
+            C3SE,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1443,6 +1446,12 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+        #
+        # # 自定义模块改动
+        # if m in C3SE:  # 添加对新模块的支持
+        #     c1 = ch[f]
+        #     args = [c1, *args] if m is C3SE else [*args]
+
         if m in base_modules:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)

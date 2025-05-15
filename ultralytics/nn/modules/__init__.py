@@ -102,6 +102,12 @@ from .transformer import (
     TransformerLayer,
 )
 
+#导入自定义模块
+from .custom_modules import (
+    C3SE,  # 自定义C3SE模块
+    SEBlock,     # 自定义SE模块
+)
+
 __all__ = (
     "Conv",
     "Conv2",
@@ -179,4 +185,6 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
+    "C3SE",  # 自定义C3SE模块
+    "SEBlock"     # 自定义SE模块
 )
