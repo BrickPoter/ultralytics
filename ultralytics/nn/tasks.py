@@ -70,6 +70,8 @@ from ultralytics.nn.modules import (
     v10Detect,
     C3SE,
     CBAM,
+    CSConv,
+    GConv,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1413,6 +1415,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             A2C2f,
             C3SE,
             CBAM,
+            CSConv,
+            GConv,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments

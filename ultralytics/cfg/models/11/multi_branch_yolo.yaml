@@ -1,0 +1,12 @@
+# Ultralytics 多分支YOLO模型配置文件
+
+# 参数
+nc: 8  # 类别数量
+num_branches: 3  # 分支数量
+
+# 模型结构定义
+backbone:
+  # 使用自定义的多分支YOLO模型
+  - [-1, 1, MultiBranchYOLO11, [num_branches, nc]]  # 使用自定义的多分支YOLO模型
+
+head: []

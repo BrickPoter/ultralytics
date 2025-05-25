@@ -106,6 +106,8 @@ from .transformer import (
 from .custom_modules import (
     C3SE,  # 自定义C3SE模块
     SEBlock,     # 自定义SE模块
+    CSConv,     # 自定义CSConv模块
+    GConv,        # 自定义GConv模块
 )
 
 __all__ = (
@@ -186,5 +188,7 @@ __all__ = (
     "Index",
     "A2C2f",
     "C3SE",  # 自定义C3SE模块
-    "SEBlock"     # 自定义SE模块
+    "SEBlock",     # 自定义SE模块
+    "CSConv",     # 自定义CSConv模块
+    "GConv",        # 自定义GConv模块
 )

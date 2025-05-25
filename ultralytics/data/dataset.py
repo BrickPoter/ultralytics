@@ -832,3 +832,66 @@ class ClassificationDataset:
             x["msgs"] = msgs  # warnings
             save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
             return samples
+
+
+## 自定义
+import cv2
+import numpy as np
+
+class CustomAugment:
+    """自定义图像增强工具类"""
+    @staticmethod
+    def histogram_equalization(img):
+        """直方图均衡化（YCrCb亮度通道增强）"""
+        if img.shape[-1] == 3:  # RGB转YCrCb
+            ycrcb = cv2.cvtColor(img, cv2.COLOR_RGB2YCrCb)
+            ycrcb[:, :, 0] = cv2.equalizeHist(ycrcb[:, :, 0])  # 仅均衡亮度通道
+            return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2RGB)
+        else:  # 灰度图直接均衡化
+            return cv2.equalizeHist(img)
+
+    @staticmethod
+    def multi_otsu_threshold(img, num_thresholds=2):
+        """多阈值Otsu分割（生成二值化图像）"""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.shape[-1] == 3 else img
+        # 多阈值Otsu（OpenCV 4.5+支持）
+        thresholds = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        # 简化实现：单阈值Otsu后扩展为三通道（适配模型输入）
+        return cv2.cvtColor(thresholds, cv2.COLOR_GRAY2RGB) if img.shape[-1] == 3 else thresholds
+
+
+from ultralytics.data.dataset import BaseDataset
+
+
+class MultiBranchDataset(BaseDataset):
+    """多分支目标检测数据集，支持自定义增强"""
+
+    def __init__(self, num_branches=3, img_path=None, *args, **kwargs):
+        # 显式接收父类需要的参数并传递
+        super().__init__(img_path=img_path, *args, **kwargs)
+        self.num_branches = num_branches  # 分支数量
+
+    def __getitem__(self, index):
+        """返回多分支增强后的图像和共享标注"""
+        img, labels = super().__getitem__(index)  # 原图和标注（原图格式：(H, W, 3), 0-255）
+
+        # 生成各分支的增强图像（示例：3分支时，分支0原图，分支1直方图均衡化，分支2 Otsu）
+        enhanced_imgs = []
+        for i in range(self.num_branches):
+            if i == 0:
+                enhanced = img  # 分支0：原图
+            elif i == 1:
+                enhanced = CustomAugment.histogram_equalization(img)  # 分支1：直方图均衡化
+            elif i == 2:
+                enhanced = CustomAugment.multi_otsu_threshold(img)  # 分支2：Otsu分割
+            else:
+                enhanced = img  # 更多分支默认使用原图（可扩展）
+
+            # 转换为模型输入格式（归一化+通道优先）
+            enhanced = np.transpose(enhanced, (2, 0, 1)) / 255.0  # [3, H, W]
+            enhanced_imgs.append(torch.from_numpy(enhanced).float())
+
+        return {
+            'images': enhanced_imgs,  # 多分支输入图像列表（len=num_branches）
+            'labels': labels  # 所有分支共享同一标注（目标位置和类别）
+        }
