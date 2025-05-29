@@ -108,6 +108,7 @@ from .custom_modules import (
     SEBlock,     # 自定义SE模块
     CSConv,     # 自定义CSConv模块
     GConv,        # 自定义GConv模块
+    GConcat,     # 自定义GConcat模块
 )
 
 __all__ = (
@@ -191,4 +192,5 @@ __all__ = (
     "SEBlock",     # 自定义SE模块
     "CSConv",     # 自定义CSConv模块
     "GConv",        # 自定义GConv模块
+    "GConcat",     # 自定义GConcat模块
 )

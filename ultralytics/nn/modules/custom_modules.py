@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .conv import Concat
 
 from ultralytics.nn.modules import C3, C3k2, CBAM, Conv, SPPF, C2PSA
 import inspect
@@ -11,6 +12,7 @@ __all__ = (
     "CSConv",      # 自定义 CSConv 通道分离卷积 模块
     "ACConv",  # 自定义可调通道卷积模块
     "GConv",       # 自定义分组卷积模块
+    "GConcat"     # 自定义 GConcat 模块
 )
 
 
@@ -283,28 +285,81 @@ class GConv(nn.Module):
         output = torch.cat(group_outputs, dim=1)
         return output
 
+class GConcat(nn.Module):
+    """
+    Concatenate a list of tensors along specified dimension after grouping.
 
+    Attributes:
+        d (int): Dimension along which to concatenate tensors.
+        g (int): Number of groups.
+    """
+
+    def __init__(self, dimension=1, groups=1):
+        """
+        Initialize GroupedConcat module.
+
+        Args:
+            dimension (int): Dimension along which to concatenate tensors.
+            groups (int): Number of groups.
+        """
+        super().__init__()
+        self.d = dimension
+        self.g = groups
+
+    def forward(self, x):
+        """
+        Concatenate input tensors along specified dimension after grouping.
+
+        Args:
+            x (List[torch.Tensor]): List of input tensors.
+
+        Returns:
+            (torch.Tensor): Concatenated tensor.
+        """
+        grouped_tensors = [torch.chunk(tensor, self.g, dim=self.d) for tensor in x]
+        concatenated_groups = [torch.cat(group, self.d) for group in zip(*grouped_tensors)]
+        return torch.cat(concatenated_groups, self.d)
+    
 # if __name__ == "__main__":
-#     # # 示例 1: in_channels=64, out_channels=32, m=1
-#     # conv1 = ACConv(in_channels=64, out_channels=32, shift_m=1, kernel_size=3, padding=1)
-#     # x1 = torch.randn(1, 64, 20, 20)
-#     # y1 = conv1(x1)
-#     # print(f"Example 1 output shape: {y1.shape}")  # 应为 (1, 32, 20, 20)
-#     #
-#     # # 示例 2: in_channels=64, out_channels=32, m=2
-#     # conv2 = ACConv(in_channels=64, out_channels=32, shift_m=2, kernel_size=3, padding=1)
-#     # x2 = torch.randn(1, 64, 20, 20)
-#     # y2 = conv2(x2)
-#     # print(f"Example 2 output shape: {y2.shape}")  # 应为 (1, 32, 20, 20)
-#     #
-#     # # 示例 3: in_channels=64, out_channels=32, m=2, stride=2
-#     # conv3 = ACConv(in_channels=64, out_channels=32, shift_m=2, kernel_size=3, stride=2, padding=1)
-#     # x3 = torch.randn(1, 64, 20, 20)
-#     # y3 = conv3(x3)
-#     # print(f"Example 3 output shape: {y3.shape}")  # 应为 (1, 32, 10, 10)
-#
-#     # 示例 4: in_channels=64, out_channels=5, m=3, stride=2
-#     conv4 = ACConv(in_channels=64, out_channels=32, shift_m=3, kernel_size=3, stride=2, padding=1)
-#     x4 = torch.randn(1, 64, 20, 20)
-#     y4 = conv4(x4)
-#     print(f"Example 4 output shape: {y4.shape}")  # 应为 (1, 5, 10, 10)
+    # # 示例 1: in_channels=64, out_channels=32, m=1
+    # conv1 = ACConv(in_channels=64, out_channels=32, shift_m=1, kernel_size=3, padding=1)
+    # x1 = torch.randn(1, 64, 20, 20)
+    # y1 = conv1(x1)
+    # print(f"Example 1 output shape: {y1.shape}")  # 应为 (1, 32, 20, 20)
+    #
+    # # 示例 2: in_channels=64, out_channels=32, m=2
+    # conv2 = ACConv(in_channels=64, out_channels=32, shift_m=2, kernel_size=3, padding=1)
+    # x2 = torch.randn(1, 64, 20, 20)
+    # y2 = conv2(x2)
+    # print(f"Example 2 output shape: {y2.shape}")  # 应为 (1, 32, 20, 20)
+    #
+    # # 示例 3: in_channels=64, out_channels=32, m=2, stride=2
+    # conv3 = ACConv(in_channels=64, out_channels=32, shift_m=2, kernel_size=3, stride=2, padding=1)
+    # x3 = torch.randn(1, 64, 20, 20)
+    # y3 = conv3(x3)
+    # print(f"Example 3 output shape: {y3.shape}")  # 应为 (1, 32, 10, 10)
+
+    # # 示例 4: in_channels=64, out_channels=5, m=3, stride=2
+    # conv4 = ACConv(in_channels=64, out_channels=32, shift_m=3, kernel_size=3, stride=2, padding=1)
+    # x4 = torch.randn(1, 64, 20, 20)
+    # y4 = conv4(x4)
+    # print(f"Example 4 output shape: {y4.shape}")  # 应为 (1, 5, 10, 10)
+    #
+
+    # groupconcat示例
+    # feature1 = torch.zeros((1, 8, 4, 4))  # 全为0的张量
+    # feature2 = torch.ones((1, 8, 4, 4))  # 全为1的张量
+    #
+    # # 初始化GroupedConcat模块
+    # grouped_concat = GConcat(dimension=1, groups=2)
+    # normal_concat = Concat(dimension=1)
+    # # 执行拼接操作
+    # result1 = grouped_concat([feature1, feature2])
+    # result2 = normal_concat([feature1, feature2])
+    # # 输出结果
+    # print(f"feature1: {feature1}")
+    # print(f"feature2: {feature2}")
+    # print(f"groupconcat: {result1}")
+    # print(f"result1 shape: {result1.shape}")
+    # print(f"normalconcat: {result2}")
+    # print(f"result2 shape: {result2.shape}")
