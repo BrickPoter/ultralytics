@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .conv import Concat
+from conv import Concat
 
 from ultralytics.nn.modules import C3, C3k2, CBAM, Conv, SPPF, C2PSA
 import inspect
@@ -285,6 +285,42 @@ class GConv(nn.Module):
         output = torch.cat(group_outputs, dim=1)
         return output
 
+# class GConcat(nn.Module): # 弃用，实现效果差，内存占用高
+#     """
+#     Concatenate a list of tensors along specified dimension after grouping.
+#
+#     Attributes:
+#         d (int): Dimension along which to concatenate tensors.
+#         g (int): Number of groups.
+#     """
+#
+#     def __init__(self, dimension=1, groups=1):
+#         """
+#         Initialize GroupedConcat module.
+#
+#         Args:
+#             dimension (int): Dimension along which to concatenate tensors.
+#             groups (int): Number of groups.
+#         """
+#         super().__init__()
+#         self.d = dimension
+#         self.g = groups
+#
+#     def forward(self, x):
+#         """
+#         Concatenate input tensors along specified dimension after grouping.
+#
+#         Args:
+#             x (List[torch.Tensor]): List of input tensors.
+#
+#         Returns:
+#             (torch.Tensor): Concatenated tensor.
+#         """
+#         grouped_tensors = [torch.chunk(tensor, self.g, dim=self.d) for tensor in x]
+#         concatenated_groups = [torch.cat(group, self.d) for group in zip(*grouped_tensors)]
+#         return torch.cat(concatenated_groups, self.d)
+
+
 class GConcat(nn.Module):
     """
     Concatenate a list of tensors along specified dimension after grouping.
@@ -295,13 +331,6 @@ class GConcat(nn.Module):
     """
 
     def __init__(self, dimension=1, groups=1):
-        """
-        Initialize GroupedConcat module.
-
-        Args:
-            dimension (int): Dimension along which to concatenate tensors.
-            groups (int): Number of groups.
-        """
         super().__init__()
         self.d = dimension
         self.g = groups
@@ -316,9 +345,20 @@ class GConcat(nn.Module):
         Returns:
             (torch.Tensor): Concatenated tensor.
         """
-        grouped_tensors = [torch.chunk(tensor, self.g, dim=self.d) for tensor in x]
-        concatenated_groups = [torch.cat(group, self.d) for group in zip(*grouped_tensors)]
-        return torch.cat(concatenated_groups, self.d)
+        # Preallocate list for grouped chunks
+        chunks = []
+        for tensor in x:
+            # Split tensor into groups along specified dimension
+            chunk_list = tensor.chunk(self.g, dim=self.d)
+            chunks.append(chunk_list)
+
+        # Directly concatenate in group-major order
+        return torch.cat([
+            chunk
+            for i in range(self.g)
+            for chunk in (chunks[j][i] for j in range(len(x)))
+        ], dim=self.d)
+
     
 # if __name__ == "__main__":
     # # 示例 1: in_channels=64, out_channels=32, m=1
@@ -346,16 +386,18 @@ class GConcat(nn.Module):
     # print(f"Example 4 output shape: {y4.shape}")  # 应为 (1, 5, 10, 10)
     #
 
-    # groupconcat示例
-    # feature1 = torch.zeros((1, 8, 4, 4))  # 全为0的张量
-    # feature2 = torch.ones((1, 8, 4, 4))  # 全为1的张量
+    # Gconcat示例
+    # feature1 = torch.randn((2, 9, 3, 3))  # 全为0的张量
+    # feature2 = torch.randn((2, 9, 3, 3))  # 全为1的张量
     #
     # # 初始化GroupedConcat模块
-    # grouped_concat = GConcat(dimension=1, groups=2)
+    # grouped_concat = GConcat(dimension=1, groups=3)
     # normal_concat = Concat(dimension=1)
+    #
     # # 执行拼接操作
     # result1 = grouped_concat([feature1, feature2])
     # result2 = normal_concat([feature1, feature2])
+    #
     # # 输出结果
     # print(f"feature1: {feature1}")
     # print(f"feature2: {feature2}")
@@ -363,3 +405,4 @@ class GConcat(nn.Module):
     # print(f"result1 shape: {result1.shape}")
     # print(f"normalconcat: {result2}")
     # print(f"result2 shape: {result2.shape}")
+
