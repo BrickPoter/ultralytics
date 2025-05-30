@@ -73,6 +73,7 @@ from ultralytics.nn.modules import (
     CSConv,
     GConv,
     GConcat,
+    SConv,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -210,7 +211,7 @@ class BaseModel(torch.nn.Module):
         """
         if not self.is_fused():
             for m in self.model.modules():
-                if isinstance(m, (Conv, Conv2, DWConv)) and hasattr(m, "bn"):
+                if isinstance(m, (Conv, Conv2, DWConv, SConv)) and hasattr(m, "bn"):
                     if isinstance(m, Conv2):
                         m.fuse_convs()
                     m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
@@ -1418,6 +1419,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             CBAM,
             CSConv,
             GConv,
+            SConv,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments

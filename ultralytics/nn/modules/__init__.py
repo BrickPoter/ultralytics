@@ -109,6 +109,7 @@ from .custom_modules import (
     CSConv,     # 自定义CSConv模块
     GConv,        # 自定义GConv模块
     GConcat,     # 自定义GConcat模块
+    SConv,        # 自定义SConv模块
 )
 
 __all__ = (
@@ -193,4 +194,5 @@ __all__ = (
     "CSConv",     # 自定义CSConv模块
     "GConv",        # 自定义GConv模块
     "GConcat",     # 自定义GConcat模块
+    "SConv",        # 自定义SConv模块
 )

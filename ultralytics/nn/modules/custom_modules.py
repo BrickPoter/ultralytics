@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from conv import Concat
+# from conv import Concat
 
 from ultralytics.nn.modules import C3, C3k2, CBAM, Conv, SPPF, C2PSA
 import inspect
@@ -12,9 +12,17 @@ __all__ = (
     "CSConv",      # 自定义 CSConv 通道分离卷积 模块
     "ACConv",  # 自定义可调通道卷积模块
     "GConv",       # 自定义分组卷积模块
-    "GConcat"     # 自定义 GConcat 模块
+    "GConcat",     # 自定义 GConcat 模块
+    "SConv",        # 自定义 SConv 模块
 )
 
+def autopad(k, p=None, d=1):  # kernel, padding, dilation
+    """Pad to 'same' shape outputs."""
+    if d > 1:
+        k = d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]  # actual kernel-size
+    if p is None:
+        p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
+    return p
 
 # 定义 SE (Squeeze-and-Excitation) 模块
 class SEBlock(nn.Module):
@@ -108,7 +116,7 @@ class ACConv(nn.Module):
     def __init__(self, in_channels, out_channels, shift_m, kernel_size=3, stride=1, padding=1, use_bn=True, act=True):
         """
         可调通道卷积模块
-        
+
         Args:
             in_channels (int): 输入通道数
             out_channels (int): 输出通道数
@@ -120,7 +128,7 @@ class ACConv(nn.Module):
             act (bool): 是否使用激活函数
         """
         super().__init__()
-        
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.shift_m = shift_m
@@ -129,25 +137,25 @@ class ACConv(nn.Module):
         self.padding = padding
         self.use_bn = use_bn
         self.act = act
-        
+
         # 计算中间参数n
         self.n = in_channels - shift_m * (out_channels - 1)
-        
+
         # 检查n是否大于0
         if self.n <= 0:
             raise ValueError(f"计算得到的n={self.n}必须大于0。请调整shift_m或输入/输出通道数。")
-        
+
         # 构建卷积层列表
         self.convs = nn.ModuleList()
         for i in range(out_channels):
             # 计算当前输出通道对应的输入通道范围
             start_channel = i * shift_m
             end_channel = start_channel + self.n
-            
+
             # 确保不超出输入通道范围
             if end_channel > in_channels:
                 raise ValueError(f"通道索引超出范围: {end_channel} > {in_channels}")
-            
+
             # 为每个输出通道创建一个卷积层
             # layers = [nn.Conv2d(self.n, 1, self.kernel_size, self.stride, self.padding)]
             # 使用C3k2模块卷积
@@ -157,23 +165,23 @@ class ACConv(nn.Module):
             if act:
                 layers.append(nn.SiLU(inplace=True))
             self.convs.append(nn.Sequential(*layers))
-    
+
     def forward(self, x):
         batch_size, _, height, width = x.shape
         outputs = []
-        
+
         for i in range(self.out_channels):
             # 计算当前输出通道对应的输入通道范围
             start_channel = i * self.shift_m
             end_channel = start_channel + self.n
-            
+
             # 提取对应的输入通道
             x_part = x[:, start_channel:end_channel]
-            
+
             # 应用卷积
             y = self.convs[i](x_part)
             outputs.append(y)
-        
+
         # 拼接所有输出通道
         return torch.cat(outputs, dim=1)
 
@@ -359,7 +367,106 @@ class GConcat(nn.Module):
             for chunk in (chunks[j][i] for j in range(len(x)))
         ], dim=self.d)
 
-    
+#
+class Shift(nn.Module):
+    def __init__(self, channels, shift_groups=4):
+        super().__init__()
+        self.channels = channels
+        self.shift_groups = shift_groups
+        assert channels % shift_groups == 0, "Channels must be divisible by shift groups"
+        self.group_channels = channels // shift_groups
+
+    def forward(self, x):
+        B, C, H, W = x.size()
+        out = torch.zeros_like(x)
+
+        # # 0: no shift
+        # out[:, 0*self.group_channels:1*self.group_channels, :, :] = \
+        #     x[:, 0*self.group_channels:1*self.group_channels, :, :]
+        # Channel 0 group: shift right (对应左边切片赋值给右边)
+        out[:, 0*self.group_channels:1*self.group_channels, :, 1:] = \
+            x[:, 0*self.group_channels:1*self.group_channels, :, :-1]
+
+        # 1: shift up
+        out[:, 1*self.group_channels:2*self.group_channels, :-1, :] = \
+            x[:, 1*self.group_channels:2*self.group_channels, 1:, :]
+
+        # 2: shift left
+        out[:, 2*self.group_channels:3*self.group_channels, :, :-1] = \
+            x[:, 2*self.group_channels:3*self.group_channels, :, 1:]
+
+        # 3: shift down
+        out[:, 3*self.group_channels:4*self.group_channels, 1:, :] = \
+            x[:, 3*self.group_channels:4*self.group_channels, :-1, :]
+
+        return out
+
+# 位移卷积模块 BHViT 中位移卷积模块
+# class SConv(nn.Module):
+#     def __init__(self, in_channels, out_channels):
+#         super().__init__()
+#         self.shift = Shift(in_channels)
+#         self.conv1x1 = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+#         self.bn = nn.BatchNorm2d(out_channels)
+#         self.relu = nn.SiLU(inplace=True)
+#
+#     def forward(self, x):
+#         shifted = self.shift(x)
+#         out = self.conv1x1(shifted)
+#         out = self.bn(out)
+#         out += x  # 残差连接
+#         out = self.act(out)
+#         return out
+class SConv(nn.Module):
+    """Shift-based residual block with configurable stride and activation, compatible with Conv interface."""
+
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            k (int): Kernel size (ignored, shift block uses k=1 internally).
+            s (int): Stride.
+            p (int): Padding (ignored, handled by shift and autopad).
+            g (int): Groups (not used).
+            d (int): Dilation (not used).
+            act (bool | nn.Module): Activation function or disable.
+        """
+        super().__init__()
+        self.shift = Shift(c2)  # shift without params
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.conv1x1 = nn.Conv2d(c2, c2, kernel_size=1)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+        # Shortcut for downsampling (if stride > 1)
+        # self.shortcut = (
+        #     nn.Sequential(
+        #         nn.Conv2d(c1, c2, kernel_size=1, stride=s, padding=0, bias=False),
+        #         nn.BatchNorm2d(c2)
+        #     ) if s > 1 else nn.Identity()
+        # )
+
+    def forward(self, x):
+        """Standard forward pass with residual connection."""
+        x = self.act(self.bn(self.conv(x)))
+        identity = x
+        x = self.shift(x)
+        x = self.conv1x1(x)
+        x = self.bn(x)
+        x += identity
+        return self.act(x)
+
+    # def forward_fuse(self, x):
+    #     """Fused forward pass (without BN), optional in deployment."""
+    #     out = self.conv(self.shift(x))
+    #     out += self.shortcut(x)
+    #     return self.act(out)
+
+
+
 # if __name__ == "__main__":
     # # 示例 1: in_channels=64, out_channels=32, m=1
     # conv1 = ACConv(in_channels=64, out_channels=32, shift_m=1, kernel_size=3, padding=1)
@@ -392,17 +499,20 @@ class GConcat(nn.Module):
     #
     # # 初始化GroupedConcat模块
     # grouped_concat = GConcat(dimension=1, groups=3)
-    # normal_concat = Concat(dimension=1)
     #
     # # 执行拼接操作
     # result1 = grouped_concat([feature1, feature2])
-    # result2 = normal_concat([feature1, feature2])
     #
     # # 输出结果
     # print(f"feature1: {feature1}")
     # print(f"feature2: {feature2}")
     # print(f"groupconcat: {result1}")
     # print(f"result1 shape: {result1.shape}")
-    # print(f"normalconcat: {result2}")
-    # print(f"result2 shape: {result2.shape}")
 
+    # Shift 模块示例
+    # x = torch.arange(1, 10).reshape(1, 1, 3, 3).repeat(1, 8, 1, 1)
+    # # 初始化Shift模块
+    # shift=Shift(8)
+    # x1 = shift(x)
+    # print(f"x.shape:{x.shape}\nx: {x}\n")
+    # print(f"x1: {x1}")
