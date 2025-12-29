@@ -1,0 +1,24 @@
+
+# config.yaml
+teacher_model_path: "improved_yolo11.pt"
+student_model_path: "yolo11n_pruned.pt"
+
+# 训练参数
+batch_size: 16
+epochs: 50
+learning_rate: 0.001
+
+# 蒸馏参数
+distillation:
+  feature:
+    temperature: 4.0
+    alpha: 0.7
+    
+  output:
+    temperature: 4.0
+    alpha: 0.5
+    
+  hybrid:
+    temperature: 4.0
+    alpha: 0.5
+    beta: 0.3

@@ -456,8 +456,9 @@ class SConv(nn.Module):
         x = self.shift(x)
         x = self.conv1x1(x)
         x = self.bn(x)
+        x = self.act(x)
         x += identity
-        return self.act(x)
+        return self.act(self.bn(x))
 
     # def forward_fuse(self, x):
     #     """Fused forward pass (without BN), optional in deployment."""
