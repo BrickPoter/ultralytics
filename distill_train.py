@@ -1,4 +1,284 @@
-# distill_train.py
+import argparse
+import math
+from types import SimpleNamespace
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from copy import copy
+
+from ultralytics.data.utils import check_det_dataset
+from ultralytics.data.build import build_yolo_dataset, build_dataloader
+from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.modules.head import Detect
+from ultralytics.utils.torch_utils import select_device
+from ultralytics.nn.tasks import attempt_load_one_weight
+from ultralytics.cfg import get_cfg, DEFAULT_CFG
+from ultralytics.models.yolo.detect import DetectionValidator
+
+
+class KDAdaptors(nn.Module):
+    def __init__(self, device=None):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self._device = device
+
+    def set_device(self, device):
+        self._device = device
+
+    def get(self, in_c, out_c):
+        for m in self.layers:
+            if isinstance(m, nn.Conv2d) and m.in_channels == in_c and m.out_channels == out_c:
+                return m
+        m = nn.Conv2d(in_c, out_c, kernel_size=1, stride=1, padding=0, bias=False)
+        if self._device is not None:
+            m = m.to(self._device)
+        self.layers.append(m)
+        return m
+
+
+def get_head_indices(model):
+    m = model.model[-1]
+    if isinstance(m, Detect):
+        return m.f if isinstance(m.f, list) else [m.f]
+    return []
+
+
+def hook_features(model, indices):
+    outputs = {}
+    hooks = []
+    modules = {i: mod for i, mod in enumerate(model.model)}
+    for i in indices:
+        if i in modules:
+            def _hook(idx):
+                def fn(module, inp, out):
+                    outputs[idx] = out
+                return fn
+            h = modules[i].register_forward_hook(_hook(i))
+            hooks.append(h)
+    return outputs, hooks
+
+
+def remove_hooks(hooks):
+    for h in hooks:
+        h.remove()
+
+
+def split_head_logits(x, nc, reg_max):
+    box = x[:, : reg_max * 4]
+    cls = x[:, reg_max * 4 : reg_max * 4 + nc]
+    return box, cls
+
+
+def distill_train(
+    teacher_path,
+    student_path,
+    data_yaml,
+    kd_mode="all",
+    epochs=10,
+    batch_size=16,
+    imgsz=640,
+    lr=1e-3,
+    device_str="",
+    alpha=1.0,
+    beta=1.0,
+    gamma=0.5,
+    temperature=1.0,
+    save_path="distilled_student.pt",
+    workers=4,
+):
+    device = select_device(device_str, batch_size)
+    data = check_det_dataset(data_yaml)
+    cfg = get_cfg(
+        DEFAULT_CFG,
+        {
+            "imgsz": imgsz,
+            "rect": False,
+            "cache": None,
+            "single_cls": False,
+            "task": "detect",
+            "classes": None,
+            "fraction": 1.0,
+            "workers": workers,
+        },
+    )
+
+    if str(student_path).endswith(".pt"):
+        w_s, _ = attempt_load_one_weight(student_path)
+        student = DetectionModel(cfg=w_s.yaml, nc=data["nc"], ch=data["channels"], verbose=False)
+        student.load(w_s)
+    else:
+        student = DetectionModel(cfg=student_path, nc=data["nc"], ch=data["channels"], verbose=False)
+    student = student.to(device)
+    student.args = cfg
+    student.names = data["names"]
+    student.nc = data["nc"]
+
+    w_t, _ = attempt_load_one_weight(teacher_path)
+    teacher = DetectionModel(cfg=w_t.yaml, nc=data["nc"], ch=data["channels"], verbose=False)
+    teacher.load(w_t)
+    teacher = teacher.to(device)
+    teacher.eval()
+    teacher.args = cfg
+    teacher.names = data["names"]
+    teacher.nc = data["nc"]
+
+    train_ds = build_yolo_dataset(cfg, data["train"], batch_size, data, mode="train", rect=False, stride=32)
+    train_loader: DataLoader = build_dataloader(train_ds, batch_size, workers, shuffle=True, rank=-1)
+    val_path = data.get("val") or data.get("test")
+    val_ds = build_yolo_dataset(cfg, val_path, batch_size * 2, data, mode="val", rect=True, stride=32)
+    val_loader: DataLoader = build_dataloader(val_ds, batch_size * 2, workers * 2, shuffle=False, rank=-1)
+    val_args = copy(cfg)
+    setattr(val_args, "model", student_path)
+    setattr(val_args, "data", data_yaml)
+    setattr(val_args, "split", "val")
+    validator = DetectionValidator(dataloader=val_loader, save_dir=None, args=val_args)
+
+    optimizer = torch.optim.Adam([p for p in student.parameters() if p.requires_grad], lr=lr)
+    adaptors = KDAdaptors(device=device).to(device)
+    optimizer.add_param_group({"params": adaptors.parameters(), "lr": lr})
+
+    def add_missing_params_to_optimizer(opt, module, lr_value):
+        existing = set(id(p) for g in opt.param_groups for p in g["params"])
+        new_params = [p for p in module.parameters() if id(p) not in existing]
+        if new_params:
+            opt.add_param_group({"params": new_params, "lr": lr_value})
+
+    reg_max = int(getattr(student.model[-1], "reg_max", 16))
+    nc = student.yaml["nc"]
+    kd_mid_weight = alpha if kd_mode in {"mid", "all"} else 0.0
+    kd_out_weight_cls = beta if kd_mode in {"out", "all"} else 0.0
+    kd_out_weight_box = gamma if kd_mode in {"out", "all"} else 0.0
+
+    student.train()
+    indices_s = get_head_indices(student)
+    indices_t = get_head_indices(teacher)
+    iters = math.ceil(len(train_ds) / batch_size) * epochs
+    kldiv = nn.KLDivLoss(reduction="batchmean")
+
+    if getattr(student, "criterion", None) is None:
+        student.criterion = student.init_criterion()
+
+    for epoch in range(epochs):
+        for batch in train_loader:
+            img = batch["img"].to(device).float() / 255.0
+            batch["img"] = img
+            with torch.no_grad():
+                feats_t, hooks_t = hook_features(teacher, indices_t)
+                pred_t = teacher.predict(img)
+                remove_hooks(hooks_t)
+                raw_t = pred_t[1]
+
+            feats_s, hooks_s = hook_features(student, indices_s)
+            preds_s = student.forward(img)
+            remove_hooks(hooks_s)
+
+            det_out = student.criterion(preds_s, batch)
+            if isinstance(det_out, tuple):
+                det_vec, loss_items = det_out
+            else:
+                det_vec, loss_items = det_out, None
+            loss_det = det_vec.sum() if torch.is_tensor(det_vec) and det_vec.ndim > 0 else det_vec
+
+            loss_kd_mid = torch.tensor(0.0, device=device)
+            if kd_mid_weight > 0.0 and feats_s and feats_t:
+                keys_s = sorted(feats_s.keys())
+                keys_t = sorted(feats_t.keys())
+                n = min(len(keys_s), len(keys_t))
+                for i in range(n):
+                    fs = feats_s[keys_s[i]]
+                    ft = feats_t[keys_t[i]].detach()
+                    if fs.shape[-2:] != ft.shape[-2:]:
+                        fs = F.interpolate(fs, size=ft.shape[-2:], mode="bilinear", align_corners=False)
+                    if fs.shape[1] != ft.shape[1]:
+                        proj = adaptors.get(fs.shape[1], ft.shape[1])
+                        add_missing_params_to_optimizer(optimizer, adaptors, lr)
+                        fs = proj(fs)
+                    loss_kd_mid = loss_kd_mid + F.mse_loss(fs, ft)
+                loss_kd_mid = loss_kd_mid / max(n, 1)
+
+            loss_kd_out_cls = torch.tensor(0.0, device=device)
+            loss_kd_out_box = torch.tensor(0.0, device=device)
+            if kd_out_weight_cls > 0.0 or kd_out_weight_box > 0.0:
+                raw_s = preds_s
+                nls = min(len(raw_s), len(raw_t))
+                for i in range(nls):
+                    rs = raw_s[i]
+                    rt = raw_t[i].detach()
+                    if rs.shape[-2:] != rt.shape[-2:]:
+                        rs = F.interpolate(rs, size=rt.shape[-2:], mode="nearest")
+                    bs = rs.shape[0]
+                    rs_flat = rs.view(bs, rs.shape[1], -1)
+                    rt_flat = rt.view(bs, rt.shape[1], -1)
+                    box_s, cls_s = split_head_logits(rs_flat, nc, reg_max)
+                    box_t, cls_t = split_head_logits(rt_flat, nc, reg_max)
+                    if kd_out_weight_box > 0.0:
+                        loss_kd_out_box = loss_kd_out_box + F.mse_loss(box_s, box_t)
+                    if kd_out_weight_cls > 0.0:
+                        ps = torch.sigmoid(cls_s / temperature)
+                        pt = torch.sigmoid(cls_t / temperature)
+                        loss_kd_out_cls = loss_kd_out_cls + kldiv(torch.log(ps + 1e-9), pt) * (temperature ** 2)
+                loss_kd_out_cls = loss_kd_out_cls / max(nls, 1)
+                loss_kd_out_box = loss_kd_out_box / max(nls, 1)
+
+            loss_total = (
+                loss_det
+                + kd_mid_weight * loss_kd_mid
+                + kd_out_weight_cls * loss_kd_out_cls
+                + kd_out_weight_box * loss_kd_out_box
+            )
+            optimizer.zero_grad()
+            loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=10.0)
+            optimizer.step()
+        with torch.no_grad():
+            metrics = validator(model=student)
+            if isinstance(metrics, dict):
+                print({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
+
+    torch.save({"model": student}, save_path)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--teacher", type=str, required=True)
+    parser.add_argument("--student", type=str, required=True)
+    parser.add_argument("--data", type=str, required=True)
+    parser.add_argument("--mode", type=str, default="all", choices=["mid", "out", "all"])
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--imgsz", type=int, default=640)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--device", type=str, default="")
+    parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--gamma", type=float, default=0.5)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--save", type=str, default="distilled_student.pt")
+    parser.add_argument("--workers", type=int, default=4)
+    args = parser.parse_args()
+    distill_train(
+        teacher_path=args.teacher,
+        student_path=args.student,
+        data_yaml=args.data,
+        kd_mode=args.mode,
+        epochs=args.epochs,
+        batch_size=args.batch,
+        imgsz=args.imgsz,
+        lr=args.lr,
+        device_str=args.device,
+        alpha=args.alpha,
+        beta=args.beta,
+        gamma=args.gamma,
+        temperature=args.temperature,
+        save_path=args.save,
+        workers=args.workers,
+    )
+
+
+if __name__ == "__main__":
+    main()
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
